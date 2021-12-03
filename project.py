@@ -1,0 +1,218 @@
+import matplotlib
+#matplotlib.use('Agg')
+import os
+from time import time
+import numpy as np
+import pylab as pl
+from sklearn.feature_selection import SelectKBest, chi2
+from sklearn.linear_model import RidgeClassifier
+from sklearn.svm import LinearSVC
+from sklearn.linear_model import SGDClassifier
+from sklearn.linear_model import Perceptron
+from sklearn.linear_model import PassiveAggressiveClassifier
+from sklearn.naive_bayes import BernoulliNB, MultinomialNB
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.neighbors import NearestCentroid
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.utils.extmath import density
+from sklearn import metrics
+from sklearn.model_selection import cross_validate
+import itertools
+import shutil
+from sklearn import preprocessing
+
+
+from  sklearn.datasets import load_files
+from sklearn.feature_extraction.text import TfidfVectorizer
+
+
+NUM_QUESTIONS = 3
+PLOT_RESULTS = False
+ACTIVE = True
+DATA_FOLDER = (r"C:\Users\Priyam Gupta\Desktop\Main")
+TRAIN_FOLDER = os.path.join(DATA_FOLDER,"train")
+TEST_FOLDER = os.path.join(DATA_FOLDER,"test")
+UNLABELED_FOLDER = os.path.join(DATA_FOLDER,"unlabel")
+ENCODING = 'latin1'
+while True:
+    data_train = load_files(TRAIN_FOLDER, encoding=ENCODING)
+    data_test = load_files(TEST_FOLDER, encoding=ENCODING)
+    data_unlabeled = load_files(UNLABELED_FOLDER, encoding=ENCODING)
+    
+    categories = data_train.target_names
+    
+    def size_mb(docs):
+        return sum(len(s.encode('utf-8')) for s in docs) / 1e6
+    
+    data_train_size_mb = size_mb(data_train.data)
+    data_test_size_mb = size_mb(data_test.data)
+    data_unlabeled_size_mb = size_mb(data_unlabeled.data)
+    
+    print("%d documents - %0.3fMB (training set)" % (
+        len(data_train.data), data_train_size_mb))
+    print("%d documents - %0.3fMB (test set)" % (
+        len(data_test.data), data_test_size_mb))
+    print("%d documents - %0.3fMB (unlabeled set)" % (
+        len(data_unlabeled.data), data_unlabeled_size_mb))
+    print("%d categories" % len(categories))
+    print()
+    
+    # split a training set and a test set
+    y_train = data_train.target
+    y_test =  data_test.target
+    
+    
+    print("Extracting features from the training dataset using a sparse vectorizer")
+    t0 = time()
+    vectorizer = TfidfVectorizer(encoding= ENCODING, use_idf=True, norm='l2', binary=False, sublinear_tf=True,min_df=0.001, max_df=1.0, ngram_range=(1, 2), analyzer='word', stop_words=None)
+    
+    # the output of the fit_transform (x_train) is a sparse csc matrix.
+    X_train = vectorizer.fit_transform(data_train.data)
+    duration = time() - t0
+    print("done in %fs at %0.3fMB/s" % (duration, data_train_size_mb / duration))
+    print("n_samples: %d, n_features: %d" % X_train.shape)
+    print()
+    
+    print("Extracting features from the test dataset using the same vectorizer")
+    t0 = time()
+    X_test = vectorizer.transform(data_test.data)
+    duration = time() - t0
+    print("done in %fs at %0.3fMB/s" % (duration, data_test_size_mb / duration))
+    print("n_samples: %d, n_features: %d" % X_test.shape)
+    print()
+    
+    print("Extracting features from the unlabled dataset using the same vectorizer")
+    t0 = time()
+    X_unlabeled = vectorizer.transform(data_unlabeled.data)
+    duration = time() - t0
+    if duration!=0:
+        print("done in %fs at %0.3fMB/s" % (duration, data_unlabeled_size_mb / duration))
+    print("n_samples: %d, n_features: %d" % X_unlabeled.shape)
+    print()
+    
+    def trim(s):
+        """Trim string to fit on terminal (assuming 80-column display)"""
+        return s if len(s) <= 80 else s[:77] + "..."
+    
+    ###############################################################################
+    # Benchmark classifiers
+    def benchmark(clf):
+        print('_' * 80)
+        print("Training: ")
+        print(clf)
+        t0 = time()
+        
+        # Create a scaler fitted to X_train to later standarize all the subsets with the same scale ------------------
+        scaler = preprocessing.StandardScaler(with_mean=False)
+        scaler = scaler.fit(X_train)
+
+        X_train = scaler.transform(X_train)  # Standardizing ------------------     
+        clf.fit(X_train, y_train)
+        
+        train_time = time() - t0
+        print("train time: %0.3fs" % train_time)
+    
+        t0 = time()
+        X_test = scaler.transform(X_test) # Standardizing ------------------
+        pred = clf.predict(X_test) 
+        test_time = time() - t0
+        print("test time:  %0.3fs" % test_time)
+    
+        score = metrics.f1_score(y_test, pred)
+        accscore = metrics.accuracy_score(y_test, pred)
+        print ("pred count is %d" %len(pred))
+        print ('accuracy score:     %0.3f' % accscore)
+        print("f1-score:   %0.3f" % score)
+    
+        if hasattr(clf, 'coef_'):
+            print("dimensionality: %d" % clf.coef_.shape[1])
+            print("density: %f" % density(clf.coef_))
+    
+          
+    
+        
+        print("classification report:")
+        print(metrics.classification_report(y_test, pred,
+                                                target_names=categories))
+    
+        
+        print("confusion matrix:")
+        print(metrics.confusion_matrix(y_test, pred))
+        
+        print("confidence for unlabeled data:")
+        
+        X_unlabeled = scaler.transform(X_unlabeled) # Standardizing ------------------
+        
+        #compute absolute confidence for each unlabeled sample in each class
+        confidences = np.abs(clf.decision_function(X_unlabeled))
+        #average abs(confidence) over all classes for each unlabeled sample (if there is more than 2 classes)
+        if(len(categories) > 2):
+            confidences = np.average(confidences, axix=1)
+        
+        print (confidences)
+        sorted_confidences = np.argsort(confidences)
+        question_samples = []
+        #select top k low confidence unlabeled samples
+        low_confidence_samples = sorted_confidences[0:NUM_QUESTIONS]
+        #select top k high confidence unlabeled samples
+        high_confidence_samples = sorted_confidences[-NUM_QUESTIONS:]
+
+        question_samples.extend(low_confidence_samples.tolist())
+        question_samples.extend(high_confidence_samples.tolist())
+
+        
+        print()
+        clf_descr = str(clf).split('(')[0]
+        return clf_descr, score, train_time, test_time, question_samples
+    
+    
+    results = []
+    results.append(benchmark(LinearSVC(loss='l2', penalty='l2',
+                                                dual=False, tol=1e-3, class_weight='auto')))
+ 
+    
+    # make some plots
+    
+    indices = np.arange(len(results))
+    
+    results = [[x[i] for x in results] for i in range(5)]
+    
+    clf_names, score, training_time, test_time, question_samples = results
+    training_time = np.array(training_time) / np.max(training_time)
+    test_time = np.array(test_time) / np.max(test_time)
+    if PLOT_RESULTS:
+        pl.figure(figsize=(12,8))
+        pl.title("Score")
+        pl.barh(indices, score, .2, label="score", color='r')
+        pl.barh(indices + .3, training_time, .2, label="training time", color='g')
+        pl.barh(indices + .6, test_time, .2, label="test time", color='b')
+        pl.yticks(())
+        pl.legend(loc='best')
+        pl.subplots_adjust(left=.25)
+        pl.subplots_adjust(top=.95)
+        pl.subplots_adjust(bottom=.05)
+        
+        for i, c in zip(indices, clf_names):
+            pl.text(-.3, i, c)
+        pl.savefig('ngramoptimize.png')
+        pl.show()
+
+    if ACTIVE:
+        for i in question_samples[0]:
+            filename = data_unlabeled.filenames[i]
+            print (filename)
+            print ('**************************content***************************')
+            print (data_unlabeled.data[i])
+            print ('**************************content end***********************')
+            print ("Annotate this text (select one label):")
+            for i in range(0, len(categories)):
+                print ("%d = %s" %(i+1, categories[i]))
+            labelNumber = raw_input("Enter the correct label number:")
+            while labelNumber.isdigit()== False:
+                labelNumber = raw_input("Enter the correct label number (a number please):")
+            labelNumber = int(labelNumber)
+            category = categories[labelNumber - 1] 
+            dstDir = os.path.join(TRAIN_FOLDER, category) 
+            shutil.move(filename, dstDir)
+    else:
+        break
